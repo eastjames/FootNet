@@ -1,6 +1,6 @@
 # FootNet
 
-FootNet is a deep learning emulator of atmospheric transport based on a U-Net++ architecture. It generates source-receptor relationships (footprints) for both surface and column-averaged greenhouse gas measurements at 1 km resolution, operating ~650x faster than traditional Lagrangian models such as STILT and X-STILT. FootNet is trained on 500,000 pseudo-observations across the contiguous United States (CONUS) using meteorological data from HRRR.
+FootNet is a deep learning emulator of atmospheric transport based on a U-Net++ architecture. It generates source-receptor relationships (footprints) for both surface and column-averaged greenhouse gas measurements at 1 km resolution, operating ~650x faster than traditional Lagrangian models such as STILT and X-STILT. FootNet is trained on 500,000 pseudo-observations across the contiguous United States (CONUS) using meteorological data from HRRR
 
 ## Features
 
