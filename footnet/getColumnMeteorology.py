@@ -7,14 +7,20 @@ import geopandas as gpd
 import shapely
 import datetime
 from scipy.spatial import Delaunay
-from tqdm import tqdm
+from tqdm import tqdm 
+from herbie import Herbie
+import warnings
 
 class ColumnMeteorology():
     """
     Class to get column meteorology data from HRRR lite files for given time and locations.
     9 variables: 'U10M', 'V10M', 'PBLH', 'PRSS', 'U850', 'V850', 'U500', 'V500', 'T850'
     """
-    def __init__(self, time_list, lons, lats, trimsize, hr3lat_full, hr3lon_full, HRRR_DIR, backhours=[0, 6, 12, 18, 24]):
+    def __init__(
+            self, time_list, lons, lats, trimsize, hr3lat_full,
+            hr3lon_full, HRRR_DIR, backhours=[0, 6, 12, 18, 24],
+            herbie = True
+        ):
         """
         Init function to set up parameters.
         time_list: list of datetime objects
@@ -34,7 +40,11 @@ class ColumnMeteorology():
         self.hr3lon_full = hr3lon_full
         self.HRRR_DIR = HRRR_DIR
         self.backhours = backhours
-        self.input_met_dict, self.processed_met_dict = self.get_input_met_dict(time_list, lons, lats, trimsize)
+        self.herbie = herbie
+        if not self.herbie:
+            self.input_met_dict, self.processed_met_dict = self.get_input_met_dict(time_list, lons, lats, trimsize)
+        else:
+            self.input_met_dict, self.processed_met_dict = self.get_input_met_dict_herbie()
 
     def get_input_met_dict(self, time_list, lons, lats, trimsize, hist=0):
         """
@@ -57,6 +67,28 @@ class ColumnMeteorology():
             for dt in tstamp_list:
                 if dt not in input_met_dict:
                     input_met_dict[dt] = self.get_met_column_data_lite(lons, lats, dt, hist=hist, trimsize=trimsize)
+                    processed_input_dict[dt] = self.transform_func_24h(input_met_dict[dt].copy())
+        return input_met_dict, processed_input_dict
+
+
+    def get_input_met_dict_herbie(self):
+        """
+        Get input meteorology data dictionary for given time list and locations
+        using Herbie to access HRRR on aws
+
+        Returns two dictionaries: raw input data and processed data.
+        1. input_met_dict: {timestamp_str: met_data_array}
+        2. processed_input_dict: {timestamp_str: processed_met_data_array}
+        """
+        input_met_dict = {}
+        processed_input_dict = {}
+        for tstamp in tqdm(self.time_list):
+            tstamp_list = [tstamp+datetime.timedelta(hours=-hist) for hist in self.backhours]
+            # tstamp = datetime.datetime.strftime(tstamp, "%Y%m%d%H")
+            tstamp_list = [datetime.datetime.strftime(val, "%Y%m%d%H") for val in tstamp_list]
+            for dt in tstamp_list:
+                if dt not in input_met_dict:
+                    input_met_dict[dt] = self.get_met_column_data_lite(self.lons, self.lats, dt, hist=0, trimsize=self.trimsize, herbie=self.herbie)
                     processed_input_dict[dt] = self.transform_func_24h(input_met_dict[dt].copy())
         return input_met_dict, processed_input_dict
 
@@ -141,7 +173,7 @@ class ColumnMeteorology():
         # return HRRR_DIR + 'hysplit.%04d%02d%02d.%02dz.hrrra'%(yy, mm, dd, hhh[hidx]) # For direct loading data from original HRRR files
 
 
-    def get_met_column_data_lite(self, footlons, footlats, timestamp, hist=0, trimsize=150):
+    def get_met_column_data_lite(self, footlons, footlats, timestamp, hist=0, trimsize=150, herbie=True):
         """
         Get meteorology column data from HRRR lite files for given longitudes, latitudes, and timestamp.
         footlons: 1D array of longitudes
@@ -161,11 +193,58 @@ class ColumnMeteorology():
         dtnow = datetime.datetime.strptime(timestamp[:10], "%Y%m%d%H")
         histdt = dtnow + datetime.timedelta(hours=hist)
         _yy, _mm, _dd, _hh = histdt.year, histdt. month, histdt.day, histdt.hour
-        h3rfile = self.get_hrrr_file(_yy, _mm, _dd, _hh)
-        # print(h3rfile)
-        fh = nc.Dataset(h3rfile)
-        # fh = xr.open_dataset(h3rfile, engine="pseudonetcdf") # For direct loading data from original HRRR files (very slow)
-        h3r_data = fh.variables
+
+        if not herbie:
+            h3rfile = self.get_hrrr_file(_yy, _mm, _dd, _hh)
+            # print(h3rfile)
+            fh = nc.Dataset(h3rfile)
+            # fh = xr.open_dataset(h3rfile, engine="pseudonetcdf") # For direct loading data from original HRRR files (very slow)
+            h3r_data = fh.variables
+
+        else:
+            # get from aws with Herbie
+            H = Herbie(
+                date=dtnow, model='hrrr',
+                priority='aws', save_dir='../hrrr',
+                product='sfc'
+            )
+            varlist = [
+                ':[UV]GRD:10 m', # U10, V10
+                ':HPBL', # PBLH
+                ':PRES:surf', # PRSS
+                ':[U,V]GRD:[85][05]0', # U850, V850, U500, V500
+                ':TMP:850' # T850
+            ]
+            name_map = {
+                'u10': 'U10M',
+                'v10': 'V10M',
+                'sp': 'PRSS',
+                'blh': 'PBLH',
+                't': 'TEMP9_850hPa',
+                'u500': 'UWND17_500hPa',
+                'v500': 'VWND17_500hPa',
+                'u850': 'UWND9_850hPa',
+                'v850': 'VWND9_850hPa',
+            }
+            # download files and open in xarray
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', category=FutureWarning)
+                dslist = H.xarray("|".join(varlist))
+                ds = xr.merge(dslist)
+            ds['u500'] = ds['u'].sel(isobaricInhPa = 500)
+            ds['v500'] = ds['v'].sel(isobaricInhPa = 500)
+            ds['u850'] = ds['u'].sel(isobaricInhPa = 850)
+            ds['v850'] = ds['v'].sel(isobaricInhPa = 850)
+            ds = ds.drop_vars(['u','v','isobaricInhPa'])
+            ds = ds.rename(name_map)
+
+            # surface pressure units Pa --> hPa
+            ds['PRSS'][:] = ds['PRSS'].values / 100
+
+            # add singlet time dimension
+            h3r_data = ds.expand_dims(time=[H.date.as_unit('ns').value])
+            fh = h3r_data
+
         times = [pd.to_datetime(int(val), unit='ns') for val in np.array(fh['time'])]
         tidx = np.argmin(np.abs(np.array(times) - histdt))
         
